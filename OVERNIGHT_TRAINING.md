@@ -107,6 +107,11 @@ cp reindex_step/logs/inspired_redial_wikipedia/rnn/version_0/checkpoints/best.ck
 Then copy `best.ckpt` back to this machine (or continue on the mini) for
 the adapt step (`scripts/adapt_step_for_*.sh`).
 
+To share the trained aggregator on the Hugging Face Hub, use
+`scripts/publish_aggregator.py` — it strips the frozen Llama-2 embedding
+(a licensed derivative, and ~525MB of the checkpoint) so only the weights
+you trained are published. Run it without `--push` first for a dry run.
+
 ## Reference: single-epoch smoke test
 
 To verify the setup end-to-end in ~3 minutes before committing to the
