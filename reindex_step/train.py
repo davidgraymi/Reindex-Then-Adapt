@@ -188,6 +188,8 @@ class Model(pl.LightningModule):
         self.step_outputs_by_dataset = {
             data: defaultdict(list) for data in self.args.data_names
         }
+        # per-dataset candidate index tensors, filled lazily on first use
+        self._data2single_cache = {}
 
     def squeeze_embeddings(self, candidates):
         """Squeeze the llm token embedding to single token embedding
@@ -201,10 +203,19 @@ class Model(pl.LightningModule):
         llm_tokens = (
             self.single2llm(candidates).detach().long()
         )  # (candidate_size, llm_len)
+        attention_mask = llm_tokens != 0  # (candidate_size, llm_len)
+        if getattr(self.args, "trim_pad", False):
+            # single2llm is padded to the global max llm length (e.g. 32), but
+            # most items use far fewer tokens. The aggregator only ever reads
+            # up to the last real token, so dropping columns that are padding
+            # for every candidate in this batch avoids running the GRU over
+            # dead timesteps -- roughly halves encode time in practice.
+            max_len = int(attention_mask.sum(dim=1).max())
+            llm_tokens = llm_tokens[:, :max_len]
+            attention_mask = attention_mask[:, :max_len]
         llm_embed = self.llm_embed(
             llm_tokens
         )  # (candidate_size, llm_len, embed_size)
-        attention_mask = llm_tokens != 0  # (candidate_size, llm_len)
         return self.model(
             inputs_embeds=llm_embed, attention_mask=attention_mask
         )  # (candidate_size, embed_size)
@@ -288,16 +299,33 @@ class Model(pl.LightningModule):
         )
         self.step_outputs[mode].extend(rank.tolist())
 
-        # Update evaluation results by dataset
-        for i, data in enumerate(d):
-            logits_ = logits[i, self.args.data2single[data]]
-            pos_logits_ = pos_logits[i, 0]
+        # Update evaluation results by dataset. Group the batch by dataset and
+        # rank each group in one shot instead of looping per sample (which cost
+        # a Python-level GPU sync on every element).
+        d_arr = np.asarray(d)
+        for data in np.unique(d_arr):
+            rows = torch.as_tensor(
+                np.nonzero(d_arr == data)[0], device=logits.device
+            )
+            cand = self._data2single_tensor(data)
+            sub = logits.index_select(0, rows).index_select(1, cand)
+            pos_sub = pos_logits.index_select(0, rows)  # (n, 1)
             rank_ = torch.div(
-                (logits_ > pos_logits_).sum() + (logits_ >= pos_logits_).sum(),
+                (sub > pos_sub).sum(dim=1) + (sub >= pos_sub).sum(dim=1),
                 2,
                 rounding_mode="floor",
             )
-            self.step_outputs_by_dataset[data][mode].append(rank_.item())
+            self.step_outputs_by_dataset[data][mode].extend(rank_.tolist())
+
+    def _data2single_tensor(self, data):
+        """Candidate item indices for a dataset, cached as a device tensor."""
+        t = self._data2single_cache.get(data)
+        if t is None:
+            t = torch.as_tensor(
+                self.args.data2single[data], device=self.device
+            )
+            self._data2single_cache[data] = t
+        return t
 
     def training_step(self, batch, batch_idx):
         q, l = batch["input"].float(), batch["label"].long()
@@ -306,7 +334,9 @@ class Model(pl.LightningModule):
         )
         logits = self.forward(q, pos=l, neg=n)
         loss = self.loss(logits, torch.zeros_like(l).to(l.device))
-        self.log("train/loss", loss.item())
+        # log the tensor (Lightning defers the device->host copy) rather than
+        # calling .item(), which forces a GPU sync on every single step
+        self.log("train/loss", loss, on_step=True, on_epoch=False)
         return loss
 
     def _on_epoch_end(self, mode):
@@ -442,6 +472,8 @@ def main(
     load_pretrained_weights: str = None,
     test_only: bool = False,
     max_minutes: int = 180,
+    trim_pad: bool = False,
+    resume: str = None,
     ks: list = [1, 5, 10, 50],
 ):
     # Load args
@@ -524,10 +556,14 @@ def main(
         )
         trainer.test(model=model, dataloaders=test_loader)
     else:
+        # `resume` restores weights, optimizer state, epoch and the max_time
+        # Timer from a checkpoint. Because the Timer's elapsed time is restored,
+        # `max_minutes` must cover elapsed + the additional budget you want.
         trainer.fit(
             model=model,
             train_dataloaders=train_loader,
             val_dataloaders=val_loader,
+            ckpt_path=args.resume,
         )
         trainer.test(model=model, dataloaders=test_loader, ckpt_path="best")
 
