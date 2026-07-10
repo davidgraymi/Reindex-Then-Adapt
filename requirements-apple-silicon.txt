@@ -1,0 +1,13 @@
+# Working environment for Apple-silicon (M1/M2/M3) Macs, Python 3.11.
+# The original requirements.txt pins torch 2.0.1, which predates usable
+# MPS support; these are the exact versions this repo was verified with.
+torch==2.5.1
+torchaudio==2.5.1
+pytorch-lightning==2.5.5
+transformers==4.34.0
+numpy==1.26.4
+pandas==2.1.1
+jsonargparse==4.26.1
+tqdm==4.66.1
+editdistance==0.8.1
+lightning-utilities==0.10.0
