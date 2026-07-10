@@ -348,6 +348,78 @@ class Model(pl.LightningModule):
         self._on_epoch_end("test")
 
 
+class MetricsChartCallback(pl.Callback):
+    """Redraw metric charts after every validation so progress is visible
+    (and preserved) during long unattended runs."""
+
+    # on_validation_end (not on_validation_epoch_end) so the current
+    # epoch's metrics are already logged when the charts are redrawn
+    def on_validation_end(self, trainer, pl_module):
+        if trainer.sanity_checking:
+            return
+        trainer.logger.save()  # flush metrics.csv before reading it
+        csv_path = os.path.join(trainer.logger.log_dir, "metrics.csv")
+        if not os.path.exists(csv_path):
+            return
+
+        import pandas as pd
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        df = pd.read_csv(csv_path)
+        charts_dir = os.path.join(trainer.logger.log_dir, "charts")
+        os.makedirs(charts_dir, exist_ok=True)
+
+        def save_lineplot(frame, x, columns, title, path):
+            columns = [c for c in columns if c in frame.columns]
+            if not columns:
+                return
+            fig, ax = plt.subplots(figsize=(8, 5))
+            for col in columns:
+                series = frame[[x, col]].dropna()
+                if len(series):
+                    ax.plot(series[x], series[col], marker="o", label=col)
+            ax.set_xlabel(x)
+            ax.set_title(title)
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+            fig.tight_layout()
+            fig.savefig(path)
+            plt.close(fig)
+
+        save_lineplot(
+            df,
+            "step",
+            ["train/loss"],
+            "Training loss",
+            os.path.join(charts_dir, "train_loss.png"),
+        )
+        ks = pl_module.args.ks
+        save_lineplot(
+            df,
+            "epoch",
+            [f"valid/Recall@{k}" for k in ks],
+            "Validation Recall@K",
+            os.path.join(charts_dir, "valid_recall.png"),
+        )
+        save_lineplot(
+            df,
+            "epoch",
+            [f"valid/NDCG@{k}" for k in ks] + ["valid/MRR"],
+            "Validation NDCG@K and MRR",
+            os.path.join(charts_dir, "valid_ndcg_mrr.png"),
+        )
+        save_lineplot(
+            df,
+            "epoch",
+            [f"valid/{d}/Recall@10" for d in pl_module.args.data_names],
+            "Validation Recall@10 by dataset",
+            os.path.join(charts_dir, "valid_recall10_by_dataset.png"),
+        )
+
+
 ## Define Training
 
 
@@ -414,13 +486,27 @@ def main(
     checkpoint_callback = ModelCheckpoint(
         save_top_k=1, monitor="valid/Recall@10", mode="max", filename="best"
     )
+    # Crash insurance for unattended runs: also keep the most recent epoch
+    # (no monitor), independent of the validation cadence.
+    last_epoch_callback = ModelCheckpoint(
+        save_top_k=1,
+        monitor=None,
+        every_n_epochs=1,
+        save_on_train_epoch_end=True,
+        filename="last-{epoch}",
+    )
     trainer = pl.Trainer(
         default_root_dir=args.ckpt_dir,
         accelerator="auto",
         max_epochs=args.epochs,
         max_time={"minutes": args.max_minutes},
         gradient_clip_val=5.0,
-        callbacks=[early_stop_callback, checkpoint_callback],
+        callbacks=[
+            early_stop_callback,
+            checkpoint_callback,
+            last_epoch_callback,
+            MetricsChartCallback(),
+        ],
         check_val_every_n_epoch=args.print_every,
         log_every_n_steps=min(len(train_loader), 10000),
         logger=CSVLogger(

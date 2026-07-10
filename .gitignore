@@ -5,6 +5,8 @@
 *.pt
 *.ckpt
 logs/*
+reindex_step/logs/
+reindex_step/logs_smoke/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

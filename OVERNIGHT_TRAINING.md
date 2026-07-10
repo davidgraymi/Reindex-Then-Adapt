@@ -69,9 +69,17 @@ nohup caffeinate -is .venv/bin/python reindex_step/train.py \
     --data_names "[inspired,redial,wikipedia]" \
     --epochs 200 \
     --max_minutes 480 \
+    --print_every 1 \
     > reindex_step/logs/overnight_run.log 2>&1 &
 echo "PID: $!"
 ```
+
+`--print_every 1` validates (and refreshes `best.ckpt`) after every epoch
+instead of every other one — worth the ~2 min/epoch overhead overnight.
+Two checkpoints are maintained in `.../checkpoints/`:
+- `best.ckpt` — highest `valid/Recall@10` so far (kept even on a crash)
+- `last-epoch=<N>.ckpt` — the most recent completed epoch, refreshed every
+  epoch regardless of validation, so a crash loses at most one epoch
 
 Notes:
 - redditv1.5 is intentionally excluded: its 800k train samples/epoch push
@@ -88,6 +96,9 @@ tail -f reindex_step/logs/overnight_run.log
 
 # validation metrics so far
 column -s, -t reindex_step/logs/inspired_redial_wikipedia/rnn/version_*/metrics.csv | less -S
+
+# charts, redrawn after every validation
+open reindex_step/logs/inspired_redial_wikipedia/rnn/version_*/charts/
 ```
 
 When the run finishes (8h cap or early stop), the log ends with a test
