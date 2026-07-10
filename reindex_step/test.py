@@ -59,6 +59,10 @@ class Data(object):
             "Building the `samples_with_item_targets` used for training, validation, and testing..."
         )
 
+        # Encodings are stored per split as one float16 tensor (built by
+        # reindex_step/preprocess.py); samples reference rows in it by index
+        # so duplicated labels per line do not duplicate the 4096-dim vector.
+        self.encodings = defaultdict(list)
         self.samples_with_item_targets = {}
         for data_name in args.data_names:
             for split in ["valid", "test"]:
@@ -67,41 +71,41 @@ class Data(object):
                     "reindex_step/data",
                     data_name,
                     split,
-                    "output-encoding.jsonl",
+                    "output-encoding.pt",
                 )
-                for line in tqdm(
-                    open(path, "r"), desc=f"loading {data_name} {split}:"
-                ):
-                    sample = json.loads(line)
-                    MAX_LEN = (
-                        5
-                        if args.label == "labels_from_llm_as_single_token"
-                        else 100
+                if not os.path.exists(path):
+                    print(
+                        f"Skip {data_name} {split} as {path} does not exist."
+                        " Run `python reindex_step/preprocess.py` first if the"
+                        " .jsonl file exists."
                     )
-                    for sing_token in sample[args.label][:MAX_LEN]:
-                        self.samples_with_item_targets.setdefault(
-                            split, defaultdict(list)
-                        )
-                        self.samples_with_item_targets[split][
-                            "embedding"
-                        ].append(sample["encoding"])
-                        self.samples_with_item_targets[split][
-                            "single_token"
-                        ].append(sing_token)
-                        self.samples_with_item_targets[split]["dataset"].append(
-                            data_name
-                        )
-                        self.samples_with_item_targets[split]["conv_id"].append(
-                            sample["conv_id"]
-                        )
-                        self.samples_with_item_targets[split]["turn_id"].append(
-                            sample["turn_id"]
-                        )
+                    continue
+                print(f"loading {data_name} {split}...")
+                blob = torch.load(path, map_location="cpu")
+                MAX_LEN = (
+                    5
+                    if args.label == "labels_from_llm_as_single_token"
+                    else 100
+                )
+                offset = sum(e.size(0) for e in self.encodings[split])
+                self.encodings[split].append(blob["encodings"])
+                samples = self.samples_with_item_targets.setdefault(
+                    split, defaultdict(list)
+                )
+                for i, labels in enumerate(blob[args.label]):
+                    for sing_token in labels[:MAX_LEN]:
+                        samples["line_idx"].append(offset + i)
+                        samples["single_token"].append(sing_token)
+                        samples["dataset"].append(data_name)
+                        samples["conv_id"].append(blob["conv_ids"][i])
+                        samples["turn_id"].append(blob["turn_ids"][i])
+
+        self.encodings = {
+            split: torch.cat(parts) for split, parts in self.encodings.items()
+        }
 
         # Embedding size
-        self.embed_size = len(
-            self.samples_with_item_targets["test"]["embedding"][0]
-        )
+        self.embed_size = self.encodings["test"].size(1)
 
         # Single token to llm tokens
         mapping = json.load(
@@ -149,17 +153,17 @@ class Data(object):
 class Dataset(torch.utils.data.Dataset):
     def __init__(self, data, mode, args):
         self.samples_with_item_targets = data.samples_with_item_targets[mode]
+        self.encodings = data.encodings[mode]
         self.args = args
         self.mode = mode
 
     def __len__(self):
-        return len(self.samples_with_item_targets["embedding"])
+        return len(self.samples_with_item_targets["line_idx"])
 
     def __getitem__(self, index):
+        line_idx = self.samples_with_item_targets["line_idx"][index]
         batch = {
-            "input": torch.FloatTensor(
-                self.samples_with_item_targets["embedding"][index]
-            ),
+            "input": self.encodings[line_idx].float(),
             "label": self.samples_with_item_targets["single_token"][index],
             "dataset": self.samples_with_item_targets["dataset"][index],
         }
@@ -360,13 +364,13 @@ def test(args, label):
         Dataset(data=data, mode="valid", args=args),
         batch_size=args.batch_size,
         shuffle=False,
-        num_workers=16,
+        num_workers=0,
     )
     test_loader = DataLoader(
         Dataset(data=data, mode="test", args=args),
         batch_size=args.batch_size,
         shuffle=False,
-        num_workers=16,
+        num_workers=0,
     )
 
     # model and trainer
