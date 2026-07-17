@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Reindex-Then-Adapt — Live Demo</title>
+<script src="data.js"></script>
+<style>
+  :root {
+    --bg: #0f1117; --panel: #171a23; --panel2: #1d212d;
+    --text: #e8eaf0; --muted: #8b93a7; --accent: #5b8cff;
+    --user: #2a3550; --system: #232838;
+    --gt: #2fbf71; --gtBg: rgba(47,191,113,.14);
+    --bias: #f0a44b;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 15px/1.45 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+    height: 100vh; display: flex; flex-direction: column; overflow: hidden;
+  }
+  header {
+    display: flex; align-items: center; gap: 16px;
+    padding: 14px 24px; border-bottom: 1px solid #262b3a;
+  }
+  header h1 { font-size: 18px; font-weight: 650; }
+  header .sub { color: var(--muted); font-size: 13px; }
+  header .spacer { flex: 1; }
+  button {
+    background: var(--accent); color: #fff; border: 0; border-radius: 8px;
+    padding: 8px 18px; font-size: 14px; font-weight: 600; cursor: pointer;
+  }
+  button:disabled { opacity: .45; cursor: default; }
+  .toggle { display: flex; border: 1px solid #2c3346; border-radius: 9px;
+    overflow: hidden; }
+  .toggle button { background: transparent; color: var(--muted);
+    border-radius: 0; padding: 8px 14px; }
+  .toggle button.on { background: var(--panel2); color: var(--text); }
+  select {
+    background: var(--panel2); color: var(--text); border: 1px solid #2c3346;
+    border-radius: 8px; padding: 7px 10px; font-size: 13px;
+  }
+  #pipeline {
+    display: flex; gap: 8px; align-items: center; justify-content: center;
+    padding: 10px 0; font-size: 12.5px; color: var(--muted);
+  }
+  .stage {
+    padding: 6px 14px; border: 1px solid #2c3346; border-radius: 999px;
+    background: var(--panel); transition: all .35s;
+  }
+  .stage.active { border-color: var(--accent); color: var(--text);
+    box-shadow: 0 0 14px rgba(91,140,255,.35); }
+  .stage.bias.active { border-color: var(--bias);
+    box-shadow: 0 0 14px rgba(240,164,75,.35); }
+  .arrow { opacity: .5; }
+  main {
+    flex: 1; display: grid; grid-template-columns: 1fr 1.1fr; gap: 18px;
+    padding: 0 24px 20px; min-height: 0;
+  }
+  .panel {
+    background: var(--panel); border: 1px solid #232838; border-radius: 14px;
+    display: flex; flex-direction: column; min-height: 0;
+  }
+  .panel h2 {
+    font-size: 13px; font-weight: 600; letter-spacing: .06em;
+    text-transform: uppercase; color: var(--muted);
+    padding: 12px 18px; border-bottom: 1px solid #232838;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  #chat { flex: 1; overflow-y: auto; padding: 16px 18px; display: flex;
+    flex-direction: column; gap: 10px; }
+  .bubble {
+    max-width: 82%; padding: 9px 13px; border-radius: 14px; font-size: 14.5px;
+    opacity: 0; transform: translateY(8px);
+    animation: pop .3s forwards;
+  }
+  @keyframes pop { to { opacity: 1; transform: none; } }
+  .bubble.USER { align-self: flex-end; background: var(--user);
+    border-bottom-right-radius: 4px; }
+  .bubble.SYSTEM { align-self: flex-start; background: var(--system);
+    border-bottom-left-radius: 4px; }
+  .bubble .who { font-size: 11px; color: var(--muted); margin-bottom: 3px; }
+  .typing { align-self: flex-start; background: var(--system);
+    border-radius: 14px; padding: 12px 16px; display: flex; gap: 5px; }
+  .typing i { width: 7px; height: 7px; border-radius: 50%; background: var(--muted);
+    animation: blink 1s infinite; }
+  .typing i:nth-child(2) { animation-delay: .18s; }
+  .typing i:nth-child(3) { animation-delay: .36s; }
+  @keyframes blink { 0%,70%,100% { opacity: .25; } 35% { opacity: 1; } }
+  #livebar {
+    display: none; gap: 10px; padding: 12px 14px;
+    border-top: 1px solid #232838;
+  }
+  #livebar input {
+    flex: 1; background: var(--panel2); color: var(--text);
+    border: 1px solid #2c3346; border-radius: 9px; padding: 10px 14px;
+    font-size: 14.5px; outline: none;
+  }
+  #livebar input:focus { border-color: var(--accent); }
+  #livestatus { font-size: 12px; color: var(--muted); padding: 0 18px 10px;
+    display: none; }
+  #recwrap { flex: 1; position: relative; margin: 12px 14px; min-height: 0; }
+  .row {
+    position: absolute; left: 0; right: 0; height: 40px;
+    display: flex; align-items: center; gap: 10px; padding: 0 12px;
+    border-radius: 9px; background: var(--panel2);
+    transition: top .8s cubic-bezier(.4,.1,.2,1), opacity .5s, background .5s;
+    opacity: 0;
+  }
+  .row.shown { opacity: 1; }
+  .row.leaving { opacity: 0; transform: translateX(30px); }
+  .row .rank { width: 26px; font-weight: 700; color: var(--muted);
+    font-variant-numeric: tabular-nums; }
+  .row .name { flex: 1; white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis; font-size: 14px; }
+  .row .bar { height: 5px; border-radius: 3px; background: var(--accent);
+    opacity: .6; transition: width .8s; }
+  .row.gt { background: var(--gtBg); box-shadow: inset 0 0 0 1px var(--gt); }
+  .row.gt .name { color: var(--gt); font-weight: 650; }
+  .row.gt .tag { font-size: 10.5px; font-weight: 700; color: #0f1117;
+    background: var(--gt); border-radius: 5px; padding: 2px 7px; }
+  #banner {
+    margin: 0 14px 14px; padding: 11px 16px; border-radius: 10px;
+    background: var(--gtBg); border: 1px solid var(--gt);
+    font-size: 14px; display: none;
+  }
+  #banner b { color: var(--gt); }
+  #phase { font-size: 12px; color: var(--muted); text-transform: none;
+    letter-spacing: 0; font-weight: 500; }
+  #phase.bias { color: var(--bias); }
+  #convmeta { font-size: 12px; color: var(--muted); text-transform: none;
+    letter-spacing: 0; font-weight: 500; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Reindex-Then-Adapt</h1>
+  <div class="sub" id="subtitle"></div>
+  <div class="spacer"></div>
+  <div class="toggle">
+    <button id="mode-replay" class="on">Replay</button>
+    <button id="mode-live">Live chat</button>
+  </div>
+  <select id="speed">
+    <option value="1.4">Slow</option>
+    <option value="1" selected>Normal</option>
+    <option value="0.6">Fast</option>
+  </select>
+  <button id="play">&#9654;&nbsp; Play</button>
+</header>
+
+<div id="pipeline">
+  <span class="stage" id="st-conv">Conversation</span>
+  <span class="arrow">→</span>
+  <span class="stage" id="st-llm">LLM encoding</span>
+  <span class="arrow">→</span>
+  <span class="stage" id="st-agg">Aggregator (reindex)</span>
+  <span class="arrow">→</span>
+  <span class="stage bias" id="st-bias">Bias adjust (adapt)</span>
+  <span class="arrow">→</span>
+  <span class="stage" id="st-top">Top-K items</span>
+</div>
+
+<main>
+  <section class="panel">
+    <h2>Conversation <span id="convmeta"></span></h2>
+    <div id="chat"></div>
+    <div id="livestatus"></div>
+    <div id="livebar">
+      <input id="liveinput" placeholder="Tell the recommender what you're in the mood for…"
+             autocomplete="off">
+      <button id="livesend">Send</button>
+    </div>
+  </section>
+  <section class="panel">
+    <h2>Recommendations <span id="phase"></span></h2>
+    <div id="recwrap"></div>
+    <div id="banner"></div>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const ROW_H = 46;
+let speedMul = 1, playing = false, mode = 'replay';
+let liveTurns = [], liveBusy = false, serverReady = false;
+let runId = 0;  // bumped on mode switch to abort in-flight replay loops
+
+$('subtitle').textContent =
+  `${DEMO_DATA.dataset} test conversations · ${DEMO_DATA.aggregator}`;
+
+const sleep = ms => new Promise(r => setTimeout(r, ms * speedMul));
+
+function setStage(id) {
+  document.querySelectorAll('.stage').forEach(s => s.classList.remove('active'));
+  if (id) $(id).classList.add('active');
+}
+
+function clearBoard() {
+  $('chat').innerHTML = '';
+  $('recwrap').innerHTML = '';
+  $('banner').style.display = 'none';
+  $('phase').textContent = '';
+  $('phase').classList.remove('bias');
+  setStage(null);
+}
+
+function addBubble(speaker, text) {
+  const chat = $('chat');
+  const b = document.createElement('div');
+  b.className = `bubble ${speaker === 'USER' ? 'USER' : 'SYSTEM'}`;
+  b.innerHTML = `<div class="who">${speaker === 'USER' ? 'User' : 'CRS'}</div>${text}`;
+  chat.appendChild(b);
+  chat.scrollTop = chat.scrollHeight;
+  return b;
+}
+
+function addTyping() {
+  const chat = $('chat');
+  const dots = document.createElement('div');
+  dots.className = 'typing';
+  dots.innerHTML = '<i></i><i></i><i></i>';
+  chat.appendChild(dots);
+  chat.scrollTop = chat.scrollHeight;
+  return dots;
+}
+
+function makeRow(entry, rank, maxScore, minScore) {
+  const row = document.createElement('div');
+  row.className = 'row' + (entry.gt ? ' gt' : '');
+  row.dataset.token = entry.token;
+  row.style.top = (rank * ROW_H) + 'px';
+  const w = 30 + 90 * (entry.score - minScore) / (maxScore - minScore + 1e-9);
+  row.innerHTML =
+    `<span class="rank">${rank + 1}</span>` +
+    `<span class="name">${entry.name}</span>` +
+    (entry.gt ? '<span class="tag">GROUND TRUTH</span>' : '') +
+    `<span class="bar" style="width:${w.toFixed(0)}px"></span>`;
+  return row;
+}
+
+// Render `before` staggered, then FLIP-animate into `after` order.
+async function animateLists(before, after, t) {
+  const wrap = $('recwrap');
+  wrap.innerHTML = '';
+  const scores = before.map(e => e.score);
+  const mx = Math.max(...scores), mn = Math.min(...scores);
+  const rows = {};
+  for (let i = 0; i < before.length; i++) {
+    const row = makeRow(before[i], i, mx, mn);
+    wrap.appendChild(row);
+    rows[before[i].token] = row;
+    requestAnimationFrame(() => requestAnimationFrame(() => row.classList.add('shown')));
+    await sleep(t.stagger);
+  }
+  await sleep(t.holdBefore);
+
+  setStage('st-bias');
+  $('phase').textContent = 'applying per-item bias terms (adapt)…';
+  $('phase').classList.add('bias');
+  await sleep(t.biasPause);
+
+  const afterTokens = new Set(after.map(e => e.token));
+  const s2 = after.map(e => e.score);
+  const mx2 = Math.max(...s2), mn2 = Math.min(...s2);
+  for (const [token, row] of Object.entries(rows)) {
+    if (!afterTokens.has(Number(token))) row.classList.add('leaving');
+  }
+  after.forEach((entry, i) => {
+    let row = rows[entry.token];
+    if (!row) {   // new item entering from below
+      row = makeRow(entry, i, mx2, mn2);
+      row.style.top = ((after.length + 2) * ROW_H) + 'px';
+      wrap.appendChild(row);
+      rows[entry.token] = row;
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        row.classList.add('shown');
+        row.style.top = (i * ROW_H) + 'px';
+      }));
+    } else {
+      row.style.top = (i * ROW_H) + 'px';
+      row.querySelector('.rank').textContent = i + 1;
+      const w = 30 + 90 * (entry.score - mn2) / (mx2 - mn2 + 1e-9);
+      row.querySelector('.bar').style.width = w.toFixed(0) + 'px';
+    }
+  });
+  await sleep(t.holdAfter);
+  setStage('st-top');
+  $('phase').textContent = 'adapted top-10';
+}
+
+/* ---------- replay mode ---------- */
+
+async function playChat(conv, id) {
+  setStage('st-conv');
+  $('convmeta').textContent = `${conv.convId} / ${conv.turnId}`;
+  for (const turn of conv.turns) {
+    if (id !== runId) return;
+    const dots = addTyping();
+    await sleep(Math.min(350 + turn.text.length * 9, 1400));
+    dots.remove();
+    if (id !== runId) return;
+    addBubble(turn.speaker, turn.text);
+    await sleep(320);
+  }
+}
+
+async function playAll() {
+  if (playing || mode !== 'replay') return;
+  playing = true;
+  const id = ++runId;
+  $('play').disabled = true;
+  speedMul = parseFloat($('speed').value);
+  for (const conv of DEMO_DATA.conversations) {
+    if (id !== runId) { playing = false; return; }
+    clearBoard();
+    await playChat(conv, id);
+    if (id !== runId) { playing = false; return; }
+    setStage('st-llm');
+    $('phase').textContent = 'encoding conversation…';
+    await sleep(900);
+    setStage('st-agg');
+    $('phase').textContent = 'aggregator scores (before adapt)';
+    await sleep(600);
+    if (id !== runId) { playing = false; return; }
+    await animateLists(conv.before, conv.after,
+      { stagger: 130, holdBefore: 1600, biasPause: 1100, holdAfter: 1200 });
+    if (id !== runId) { playing = false; return; }
+    const banner = $('banner');
+    const arrow = conv.gtRankBefore > conv.gtRankAfter ? '↑' : '';
+    banner.innerHTML =
+      `Ground truth <b>${conv.groundTruth.join(', ')}</b> — ` +
+      `rank <b>${conv.gtRankBefore}</b> before adapt → ` +
+      `rank <b>${conv.gtRankAfter}</b> after ${arrow}`;
+    banner.style.display = 'block';
+    await sleep(3200);
+  }
+  playing = false;
+  $('play').disabled = false;
+  $('play').innerHTML = '&#8635;&nbsp; Replay';
+}
+
+/* ---------- live mode ---------- */
+
+const GREETING = "Hello! What kind of movie are you in the mood for today?";
+
+async function pollStatus() {
+  try {
+    const r = await fetch('/api/status');
+    const s = await r.json();
+    serverReady = s.ready;
+    $('livestatus').textContent = s.ready
+      ? `model ready on ${s.device} — type below`
+      : `⏳ ${s.status}`;
+    if (!s.ready && mode === 'live') setTimeout(pollStatus, 2500);
+  } catch (e) {
+    serverReady = false;
+    $('livestatus').textContent =
+      '⚠ no backend — start it with: .venv/bin/python demo/server.py ' +
+      'and open http://localhost:8765';
+  }
+}
+
+function enterLive() {
+  mode = 'live';
+  playing = false;
+  runId++;
+  clearBoard();
+  $('play').style.display = 'none';
+  $('speed').style.display = 'none';
+  $('livebar').style.display = 'flex';
+  $('livestatus').style.display = 'block';
+  $('convmeta').textContent = 'live';
+  liveTurns = [{ speaker: 'SYSTEM', text: GREETING }];
+  addBubble('SYSTEM', GREETING);
+  setStage('st-conv');
+  pollStatus();
+  $('liveinput').focus();
+}
+
+function enterReplay() {
+  mode = 'replay';
+  playing = false;
+  runId++;
+  clearBoard();
+  $('play').style.display = '';
+  $('speed').style.display = '';
+  $('livebar').style.display = 'none';
+  $('livestatus').style.display = 'none';
+  $('convmeta').textContent = '';
+  $('play').innerHTML = '&#9654;&nbsp; Play';
+}
+
+function crsReply(after) {
+  const [a, b, c] = after.map(e => e.name);
+  return `You might enjoy <b>${a}</b>. If that's not quite it, ` +
+         `maybe <b>${b}</b> or <b>${c}</b>?`;
+}
+
+async function sendLive() {
+  const input = $('liveinput');
+  const text = input.value.trim();
+  if (!text || liveBusy || !serverReady) return;
+  liveBusy = true;
+  input.value = '';
+  input.disabled = true; $('livesend').disabled = true;
+  speedMul = 1;
+
+  addBubble('USER', text);
+  liveTurns.push({ speaker: 'USER', text });
+
+  setStage('st-llm');
+  $('phase').textContent = 'encoding conversation with Llama-2-7b…';
+  $('phase').classList.remove('bias');
+  $('banner').style.display = 'none';
+  const dots = addTyping();
+  try {
+    const r = await fetch('/api/recommend', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ turns: liveTurns, k: DEMO_DATA.k }),
+    });
+    if (!r.ok) throw new Error((await r.json()).error || r.status);
+    const res = await r.json();
+    dots.remove();
+
+    setStage('st-agg');
+    $('phase').textContent = 'aggregator scores (before adapt)';
+    await animateLists(res.before, res.after,
+      { stagger: 70, holdBefore: 1000, biasPause: 700, holdAfter: 800 });
+
+    const reply = crsReply(res.after);
+    addBubble('SYSTEM', reply);
+    liveTurns.push({
+      speaker: 'SYSTEM',
+      text: reply.replace(/<\/?b>/g, ''),
+    });
+  } catch (e) {
+    dots.remove();
+    addBubble('SYSTEM', `⚠ ${e.message}`);
+  }
+  input.disabled = false; $('livesend').disabled = false;
+  liveBusy = false;
+  input.focus();
+}
+
+$('play').addEventListener('click', playAll);
+$('mode-replay').addEventListener('click', () => {
+  $('mode-replay').classList.add('on'); $('mode-live').classList.remove('on');
+  enterReplay();
+});
+$('mode-live').addEventListener('click', () => {
+  $('mode-live').classList.add('on'); $('mode-replay').classList.remove('on');
+  enterLive();
+});
+$('livesend').addEventListener('click', sendLive);
+$('liveinput').addEventListener('keydown', e => { if (e.key === 'Enter') sendLive(); });
+</script>
+</body>
+</html>

@@ -46,43 +46,46 @@ class Data(object):
             single2llm: dict, mapping from single token to llm tokens
             data2single: dict, mapping from data to the list of single token within the data
         """
+        # Encodings are stored per split as one float16 tensor (built by
+        # adapt_step/preprocess.py); samples reference rows in it by index
+        # so duplicated labels per line do not duplicate the 4096-dim vector.
+        self.encodings = defaultdict(list)
         self.samples_with_item_targets = {}
         for data_name in args.data_names:
             for split in ["train", "valid", "test"]:
                 path = os.path.join(
-                    ROOT_DIR, "data", data_name, f"{split}-for-adapt.jsonl"
+                    ROOT_DIR, "data", data_name, f"{split}-for-adapt.pt"
                 )
-                for line in tqdm(
-                    open(path, "r", encoding="utf-8"),
-                    desc=f"loading {data_name} {split}:",
+                if not os.path.exists(path):
+                    print(
+                        f"Skip {data_name} {split} as {path} does not exist."
+                        " Run `python adapt_step/preprocess.py` first if the"
+                        " .jsonl file exists."
+                    )
+                    continue
+                print(f"loading {data_name} {split}...")
+                blob = torch.load(path, map_location="cpu")
+                offset = sum(e.size(0) for e in self.encodings[split])
+                self.encodings[split].append(blob["encodings"])
+                samples = self.samples_with_item_targets.setdefault(
+                    split, defaultdict(list)
+                )
+                for i, labels in enumerate(
+                    blob["labels_from_data_as_single_token"]
                 ):
-                    sample = json.loads(line)
-                    for sing_token in sample[
-                        "labels_from_data_as_single_token"
-                    ]:
-                        self.samples_with_item_targets.setdefault(
-                            split, defaultdict(list)
-                        )
-                        self.samples_with_item_targets[split][
-                            "embedding"
-                        ].append(sample["encoding"])
-                        self.samples_with_item_targets[split][
-                            "single_token"
-                        ].append(sing_token)
-                        self.samples_with_item_targets[split]["dataset"].append(
-                            data_name
-                        )
-                        self.samples_with_item_targets[split]["conv_id"].append(
-                            str(sample["conv_id"])
-                        )
-                        self.samples_with_item_targets[split]["turn_id"].append(
-                            str(sample["turn_id"])
-                        )
+                    for sing_token in labels:
+                        samples["line_idx"].append(offset + i)
+                        samples["single_token"].append(sing_token)
+                        samples["dataset"].append(data_name)
+                        samples["conv_id"].append(str(blob["conv_ids"][i]))
+                        samples["turn_id"].append(str(blob["turn_ids"][i]))
+
+        self.encodings = {
+            split: torch.cat(parts) for split, parts in self.encodings.items()
+        }
 
         # Embedding size
-        self.embed_size = len(
-            self.samples_with_item_targets["train"]["embedding"][0]
-        )
+        self.embed_size = self.encodings["train"].size(1)
 
         # Single token to llm tokens
         mapping = json.load(
@@ -130,17 +133,17 @@ class Data(object):
 class Dataset(torch.utils.data.Dataset):
     def __init__(self, data, mode, args):
         self.samples_with_item_targets = data.samples_with_item_targets[mode]
+        self.encodings = data.encodings[mode]
         self.args = args
         self.mode = mode
 
     def __len__(self):
-        return len(self.samples_with_item_targets["embedding"])
+        return len(self.samples_with_item_targets["line_idx"])
 
     def __getitem__(self, index):
+        line_idx = self.samples_with_item_targets["line_idx"][index]
         batch = {
-            "input": torch.FloatTensor(
-                self.samples_with_item_targets["embedding"][index]
-            ),
+            "input": self.encodings[line_idx].float(),
             "label": self.samples_with_item_targets["single_token"][index],
             "dataset": self.samples_with_item_targets["dataset"][index],
         }
@@ -188,18 +191,27 @@ class Model(pl.LightningModule):
         }
 
     def _load_pretrained_aggregator(self, args):
-        """Load the pre-trained aggregator model"""
+        """Load the pre-trained aggregator model.
+
+        Supports two formats:
+        - bare export (HF davidgray/rta-aggregator): {"state_dict", "config"}
+          with unprefixed aggregator keys (rnn.*, proj.*)
+        - original Lightning best.ckpt: {"state_dict", "hyper_parameters"}
+          with `model.`-prefixed keys
+        """
 
         # Load model state dict
         model_path = args.aggregator_path
-        model_state_dict = torch.load(model_path)
+        ckpt = torch.load(model_path, map_location="cpu")
 
-        # Initialize the model
-        model_args = model_state_dict["hyper_parameters"]["args"]
-        self.model = AGGREGATORS[model_args.aggregator](model_args)
-
-        # Load the model state dict
-        self.load_state_dict(model_state_dict["state_dict"], strict=False)
+        if "config" in ckpt:
+            model_args = Namespace(**ckpt["config"])
+            self.model = AGGREGATORS[model_args.aggregator](model_args)
+            self.model.load_state_dict(ckpt["state_dict"], strict=True)
+        else:
+            model_args = ckpt["hyper_parameters"]["args"]
+            self.model = AGGREGATORS[model_args.aggregator](model_args)
+            self.load_state_dict(ckpt["state_dict"], strict=False)
 
         # Freeze the model
         if self.args.freeze_aggregator:
@@ -400,7 +412,7 @@ class Model(pl.LightningModule):
 def main(
     data_dir: str = "data/",
     llm_embed_path: str = "data/llm_embedding.pt",
-    aggregator_path: str = "ckpts/best_aggregator/checkpoints/best.ckpt",
+    aggregator_path: str = "ckpts/best_aggregator/aggregator.pt",
     freeze_llm_embed: bool = True,
     freeze_aggregator: bool = True,
     aggregator: str = "rnn",
@@ -439,19 +451,19 @@ def main(
         Dataset(data=data, mode="train", args=args),
         batch_size=args.batch_size,
         shuffle=True,
-        num_workers=16,
+        num_workers=0,
     )
     val_loader = DataLoader(
         Dataset(data=data, mode="valid", args=args),
         batch_size=args.batch_size,
         shuffle=False,
-        num_workers=16,
+        num_workers=0,
     )
     test_loader = DataLoader(
         Dataset(data=data, mode="test", args=args),
         batch_size=args.batch_size,
         shuffle=False,
-        num_workers=16,
+        num_workers=0,
     )
 
     # model and trainer
